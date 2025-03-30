@@ -66,7 +66,7 @@ class Backtest:
         pass
 
 if __name__ == "__main__":
-    listing = [
+    listings = [
         Listing(symbol='AMETHYSTS', product='AMETHYSTS', denomination='SEASHELLS'),
         Listing(symbol='STARFRUIT', product='STARFRUIT', denomination='SEASHELLS'),
     ]
@@ -80,9 +80,9 @@ if __name__ == "__main__":
     # TODO: unique output log?
     output_log = "backtest.log"
     market_data_path = "./data/test_prices_day_0.csv"
-    trade_history_path = "./data/trades_day_0.csv"
-    market_data = pd.read_csv(market_data_path)
-    trade_history = pd.read_csv(trade_history_path)
+    trade_history_path = "./data/test_trades_day_0.csv"
+    market_data = pd.read_csv(market_data_path, delimiter=";")
+    trade_history = pd.read_csv(trade_history_path, delimiter=";")
 
     trader = Trader()
     backtest = Backtest(trader, listings, position_limit, market_data, trade_history, output_log)

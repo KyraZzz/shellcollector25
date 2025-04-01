@@ -1,4 +1,5 @@
-from datamodel import Listing, Trade
+from datamodel import Listing, Trade, OrderDepth, TradingState, Observation
+from collections import defaultdict
 from run import Trader
 
 
@@ -12,11 +13,21 @@ class Backtest:
     def __init__(self, trader, listings, position_limits, market_data, trade_history, output_log):
         self.trader = trader
         self.listings = listings
-        self.position_limits = position_limits
+        self.position_limit = position_limits
         self.market_data = market_data.sort_values(by='timestamp')
-        # TODO (kyraz): I don't think we need to sort by symbol
         self.trade_history = trade_history.sort_values(by=['timestamp', 'symbol'])
         self.output_log = output_log
+
+        self.symbols = [listing.symbol for listing in self.listings]
+        self.order_book_levels = 3
+        # TODO: good naming scheme for trader
+        self.trader_data = ""
+
+        self.trades_by_timestamp = {}
+        self.current_position = {listing.symbol: 0 for listing in self.listings}
+        self.cash = {listing.symbol: 0 for listing in listings}
+        self.observations = None
+        self.pnls = {}
 
     def run(self):
         """
@@ -25,45 +36,159 @@ class Backtest:
             - For timestamp t_i, replay all market trades in trade history between t_{i-1} and t_i
             - For timestamp t_i, compute the markout pnl for each product at the current position
         """
-
-        market_data_gp_ts = self.market_data.groupby('timestamp')
-        trade_history_gp_ts = self.trade_histroy.groupby('timestamp')
+        #Debugging
+        market_data_gp_ts = market_data.groupby('timestamp')
+        trade_history_gp_ts = trade_history.groupby('timestamp')
 
         # Group trades by timestamp
-        trades_by_timestamp = defaultdict()
         for timestamp, group in trade_history_gp_ts:
             trades = [
                 Trade(
                     symbol=trade['symbol'], 
                     price=trade['price'],
                     quantity=trade['quantity'],
-                    buyer=trade['buyer'],
-                    seller=trade['seller'],
+                    buyer=trade['buyer'] if not np.isnan(trade['buyer']) else "",
+                    seller=trade['seller'] if not np.isnan(trade['buyer']) else "",
                     timestamp=trade['timestamp']
-                ) for trade in group]
-            trades_by_timestamp[timestamp] = trades
+                ) for _, trade in group.iterrows()]
+            self.trades_by_timestamp[timestamp] = trades
 
+        # Own trades since last timestamp
+        own_trades = {listing.symbol: [] for listing in self.listings}
+        # Market trades since last timestamp
+        market_trades = {listing.symbol: [] for listing in self.listings}
         for timestamp, group in market_data_gp_ts:
-            market_trades = trades_by_timestamp[timestamp]
+            order_depths = {}
+            mid_prices = {listing.symbol: None for listing in self.listings} 
+
+            # Construct order book
+            for _, row in group.iterrows():
+                symbol = row['product']
+                order_depth = OrderDepth()
+                for i in range(1, self.order_book_levels+1):
+                    # Bid
+                    bid_price = row[f'bid_price_{i}']
+                    bid_volume = row[f'bid_volume_{i}']
+                    if not np.isnan(bid_price) and not np.isnan(bid_volume):
+                        order_depth.buy_orders[int(bid_price)] = int(bid_volume)
+                        
+                    # Ask
+                    ask_price = row[f'ask_price_{i}']
+                    ask_volume = row[f'ask_volume_{i}']
+                    if not np.isnan(ask_price) and not np.isnan(ask_volume):
+                        order_depth.sell_orders[int(ask_price)] = -int(ask_volume)
+
+                    order_depths[symbol] = order_depth
+
+                    # Mid price
+                    if i == 1:
+                        mid_price = row['mid_price']
+                        mid_prices[symbol] = mid_price
+            print(f"Trades by timestamp: {self.trades_by_timestamp.get(timestamp, [])}")
+            print(f"Mid prices: {mid_prices}")
+
+            # Assemble trading state
+            trading_state = TradingState(self.trader_data, timestamp, self.listings, order_depths, own_trades, market_trades, self.current_position, self.observations)
+            orders, conversions, self.trader_data = trader.run(trading_state)
+
+            # Execute own orders, update market trade history
+            own_trades = self.execute_order(timestamp, orders, order_depths, mid_prices)
+            print(f"Own trades: {own_trades}")
+            
+            # Update market trades status
+            self.update_market_orders(timestamp, order_depths, mid_prices)
+            market_trades = {listing.symbol: [] for listing in listings}
+            if timestamp in self.trades_by_timestamp.keys():
+                for trade in self.trades_by_timestamp[timestamp]:
+                    market_trades[trade.symbol].append(trade)
+            print(f"Market trades: {market_trades}")
+
+            # Compute pnl
+            for symbol in self.symbols:
+                self.pnls[(timestamp, symbol)] = self.cash[symbol] + mid_prices[symbol] * self.current_position[symbol]
+
+    def execute_order(self, timestamp, orders, order_depths, mid_prices):
+        own_trades = []
+        for symbol in self.symbols:
+            orders_for_symbol = orders[symbol]
+            for order in orders_for_symbol:
+                if order.quantity > 0:
+                    # Execute buy order
+                    trades = self._execute_buy_order(timestamp, order, order_depths, mid_prices)
+                else:
+                    # Execute sell order
+                    trades = self._execute_sell_order(timestamp, order, order_depths, mid_prices)
+                own_trades += trades
+        return own_trades
+
+    def _execute_buy_order(self, timestamp, order, order_depths, mid_prices):
+        trades = []
+        order_depth = order_depths[order.symbol]
+        mid_price = mid_prices[order.symbol]
+
+        # Only cares about sell orders
+        for price, volume in list(order_depth.sell_orders.items()):
+            if price > order.price or order.quantity == 0:
+                break
+
+            trade_volume = min(abs(order.quantity), abs(volume))
+            if abs(trade_volume + self.current_position[order.symbol]) <= int(self.position_limit[order.symbol]):
+                trades.append(Trade(order.symbol, price, trade_volume, "SUBMISSION", "", timestamp))
+                self.current_position[order.symbol] += trade_volume
+                self.cash[order.symbol] -= price * trade_volume
+                order_depth.sell_orders[price] += trade_volume
+                order.quantity -= trade_volume
+            else:
+                print(f"Orders for product {order.symbol} exceeded limit of {position_limit[order.symbol]} set")
+
+            if order_depth.sell_orders[price] == 0:
+                del order_depth.sell_orders[price]
+
+        return trades
+
+    def _execute_sell_order(self, timestamp, order, order_depths, mid_prices):
+        trades = []
+        order_depth = order_depths[order.symbol]
+        mid_price = mid_prices[order.symbol]
+
+        # Only cares about buy orders
+        for price, volume in list(order_depth.buy_orders.items()):
+            if price < order.price or order.quantity == 0:
+                break
+
+            trade_volume = min(abs(order.quantity), abs(volume))
+            if abs(trade_volume + self.current_position[order.symbol]) <= int(self.position_limit[order.symbol]):
+                trades.append(Trade(order.symbol, price, trade_volume, "SUBMISSION", "", timestamp))
+                self.current_position[order.symbol] -= trade_volume
+                self.cash[order.symbol] += price * trade_volume
+                order_depth.buy_orders[price] -= trade_volume
+                order.quantity += trade_volume
+            else:
+                print(f"Orders for product {order.symbol} exceeded limit of {position_limit[order.symbol]}")
+
+            if order_depth.buy_orders[price] == 0:
+                del order_depth.buy_orders[price]
+
+        return trades
 
 
-            # TODO: ADD, DELETE, EXECUTE orders
-            # TODO: Construct order book
-            # TODO: Construct trading state (positions)
-            # TODO: Compute PnL
-        pass
-
-    def _add_order(self):
-        pass
-
-    def _delete_order(self):
-        pass
-
-    def _execute_order(self, trades_to_execute):
-        pass
-
-    def calc_pnl(self):
-        pass
+    def update_market_orders(self, timestamp, order_depths, mid_prices):
+        # Modify market trade history
+        trades_at_timestamp = self.trades_by_timestamp.get(timestamp, [])
+        new_trades_at_timestamp = []
+        for symbol in self.symbols:
+            order_depth = order_depths[symbol]
+            for trade in trades_at_timestamp:
+                if symbol == trade.symbol:
+                    # Market trade conflicts with us, need to update the market trade
+                    if trade.price >= mid_prices[symbol]:
+                        remain_quantity = abs(order_depth.sell_orders.get(trade.price, 0))
+                    else:
+                        remain_quantity = abs(order_depth.buy_orders.get(trade.price, 0))
+                    if remain_quantity > 0:
+                        new_quantity = min(remain_quantity, trade.quantity)
+                        new_trades_at_timestamp.append(Trade(trade.symbol, trade.price, new_quantity, "", "", timestamp))
+        self.trades_by_timestamp[timestamp] = new_trades_at_timestamp
 
 if __name__ == "__main__":
     listings = [
@@ -79,8 +204,8 @@ if __name__ == "__main__":
     # TODO: fair price of each product?
     # TODO: unique output log?
     output_log = "backtest.log"
-    market_data_path = "./data/test_prices_day_0.csv"
-    trade_history_path = "./data/test_trades_day_0.csv"
+    market_data_path = "./round0/data/test_prices_day_0.csv"
+    trade_history_path = "./round0/data/test_trades_day_0.csv"
     market_data = pd.read_csv(market_data_path, delimiter=";")
     trade_history = pd.read_csv(trade_history_path, delimiter=";")
 

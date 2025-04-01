@@ -37,8 +37,8 @@ class Backtest:
             - For timestamp t_i, compute the markout pnl for each product at the current position
         """
         #Debugging
-        market_data_gp_ts = market_data.groupby('timestamp')
-        trade_history_gp_ts = trade_history.groupby('timestamp')
+        market_data_gp_ts = self.market_data.groupby('timestamp')
+        trade_history_gp_ts = self.trade_history.groupby('timestamp')
 
         # Group trades by timestamp
         for timestamp, group in trade_history_gp_ts:
@@ -105,7 +105,9 @@ class Backtest:
 
             # Compute pnl
             for symbol in self.symbols:
-                self.pnls[(timestamp, symbol)] = self.cash[symbol] + mid_prices[symbol] * self.current_position[symbol]
+                pnl = self.cash[symbol] + mid_prices[symbol] * self.current_position[symbol]
+                self.pnls[(timestamp, symbol)] = pnl
+                self.market_data.loc[lambda x: (x['timestamp'] == timestamp) & (x['product'] == symbol), 'profit_and_loss'] = pnl
 
     def execute_order(self, timestamp, orders, order_depths, mid_prices):
         own_trades = []
@@ -208,6 +210,9 @@ if __name__ == "__main__":
     trade_history_path = "./round0/data/test_trades_day_0.csv"
     market_data = pd.read_csv(market_data_path, delimiter=";")
     trade_history = pd.read_csv(trade_history_path, delimiter=";")
+
+    market_data = market_data.loc[lambda x: x['timestamp'] <= 300]
+    trade_history = trade_history.loc[lambda x: x['timestamp'] <= 300]
 
     trader = Trader()
     backtest = Backtest(trader, listings, position_limit, market_data, trade_history, output_log)

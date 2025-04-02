@@ -130,8 +130,29 @@ class Backtest:
 
         # Only cares about sell orders
         for price, volume in list(order_depth.sell_orders.items()):
-            if price > order.price or order.quantity == 0:
+            if order.quantity == 0:
                 break
+            if price > order.price:
+                # Order is passive buy order
+                # Update market trade history
+                trades_at_timestamp = self.trades_by_timestamp.get(timestamp, [])
+                new_trades_at_timestamp = []
+                for trade in trades_at_timestamp:
+                    if trade.symbol == order.symbol and trade.price <= order.price:
+                        trade_volume = min(abs(order.quantity), trade.quantity)
+                        if abs(self.current_position[order.symbol] + order.quantity) <= int(self.position_limit[order.symbol]):
+                            updated_trade = Trade(order.symbol, order.price, trade_volume, "SUBMISSION", "", timestamp) 
+                            trades.append(updated_trade)
+                            self.current_position[order.symbol] += trade_volume
+                            self.cash[order.symbol] -= order.price * trade_volume
+                            if trade.quantity > trade_volume:
+                                new_trade = Trade(trade.symbol, trade.price, trade.quantity - trade_volume, "", "", timestamp)
+                                new_trades_at_timestamp.append(new_trade)
+                            trade = updated_trade
+                    new_trades_at_timestamp.append(trade)
+                self.trades_by_timestamp[timestamp] = new_trades_at_timestamp
+                break
+
 
             trade_volume = min(abs(order.quantity), abs(volume))
             if abs(trade_volume + self.current_position[order.symbol]) <= int(self.position_limit[order.symbol]):
@@ -155,12 +176,32 @@ class Backtest:
 
         # Only cares about buy orders
         for price, volume in list(order_depth.buy_orders.items()):
-            if price < order.price or order.quantity == 0:
+            if order.quantity == 0:
                 break
-
+            if price < order.price:
+                # Order is passive sell order
+                # Update market trade history
+                trades_at_timestamp = self.trades_by_timestamp.get(timestamp, [])
+                new_trades_at_timestamp = []
+                for trade in trades_at_timestamp:
+                    if trade.symbol == order.symbol and trade.price >= order.price:
+                        trade_volume = min(abs(order.quantity), trade.quantity)
+                        if abs(self.current_position[order.symbol] - order.quantity) <= int(self.position_limit[order.symbol]):
+                            updated_trade = Trade(order.symbol, order.price, trade_volume, "", "SUBMISSION", timestamp) 
+                            trades.append(updated_trade)
+                            self.current_position[order.symbol] -= trade_volume
+                            self.cash[order.symbol] += order.price * trade_volume
+                            if trade.quantity > trade_volume:
+                                new_trade = Trade(trade.symbol, trade.price, trade.quantity - trade_volume, "", "", timestamp)
+                                new_trades_at_timestamp.append(new_trade)
+                            trade = updated_trade
+                    new_trades_at_timestamp.append(trade)
+                self.trades_by_timestamp[timestamp] = new_trades_at_timestamp
+                break
+            # Order is aggressive sell order
             trade_volume = min(abs(order.quantity), abs(volume))
-            if abs(trade_volume + self.current_position[order.symbol]) <= int(self.position_limit[order.symbol]):
-                trades.append(Trade(order.symbol, price, trade_volume, "SUBMISSION", "", timestamp))
+            if abs(self.current_position[order.symbol] - trade_volume) <= int(self.position_limit[order.symbol]):
+                trades.append(Trade(order.symbol, price, trade_volume, "", "SUBMISSION", timestamp))
                 self.current_position[order.symbol] -= trade_volume
                 self.cash[order.symbol] += price * trade_volume
                 order_depth.buy_orders[price] -= trade_volume

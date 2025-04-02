@@ -23,11 +23,17 @@ class Backtest:
         # TODO: good naming scheme for trader
         self.trader_data = ""
 
-        self.trades_by_timestamp = {}
         self.current_position = {listing.symbol: 0 for listing in self.listings}
         self.cash = {listing.symbol: 0 for listing in listings}
         self.observations = None
+
         self.pnls = {}
+        self.trader_orders = []
+        self.trader_executions = []
+        self.market_old_executions = []
+        self.market_executions = []
+        # Updatable
+        self.trades_by_timestamp = {}
 
     def run(self):
         """
@@ -52,8 +58,9 @@ class Backtest:
                     timestamp=trade['timestamp']
                 ) for _, trade in group.iterrows()]
             self.trades_by_timestamp[timestamp] = trades
+            for trade in trades:
+                self.market_old_executions.append((timestamp, trade.symbol, trade.price, trade.quantity))
 
-        # Own trades since last timestamp
         own_trades = {listing.symbol: [] for listing in self.listings}
         # Market trades since last timestamp
         market_trades = {listing.symbol: [] for listing in self.listings}
@@ -84,16 +91,21 @@ class Backtest:
                     if i == 1:
                         mid_price = row['mid_price']
                         mid_prices[symbol] = mid_price
-            print(f"Trades by timestamp: {self.trades_by_timestamp.get(timestamp, [])}")
-            print(f"Mid prices: {mid_prices}")
 
             # Assemble trading state
             trading_state = TradingState(self.trader_data, timestamp, self.listings, order_depths, own_trades, market_trades, self.current_position, self.observations)
             orders, conversions, self.trader_data = trader.run(trading_state)
+            # Store all orders
+            for symbol, orders_by_symbol in orders.items():
+                for order in orders_by_symbol:
+                    self.trader_orders.append([timestamp, symbol, order.price, order.quantity])
 
             # Execute own orders, update market trade history
             own_trades = self.execute_order(timestamp, orders, order_depths, mid_prices)
-            print(f"Own trades: {own_trades}")
+            # Store all trades
+            for symbol, trades_by_symbol in own_trades.items():
+                for trade in trades_by_symbol:
+                    self.trader_executions.append([timestamp, trade.symbol, trade.price, trade.quantity])
             
             # Update market trades status
             self.update_market_orders(timestamp, order_depths, mid_prices)
@@ -101,7 +113,10 @@ class Backtest:
             if timestamp in self.trades_by_timestamp.keys():
                 for trade in self.trades_by_timestamp[timestamp]:
                     market_trades[trade.symbol].append(trade)
-            print(f"Market trades: {market_trades}")
+            # Store all trades
+            for symbol, trades_by_symbol in market_trades.items():
+                for trade in trades_by_symbol:
+                    self.market_executions.append([timestamp, trade.symbol, trade.price, trade.quantity])
 
             # Compute pnl
             for symbol in self.symbols:
@@ -110,7 +125,7 @@ class Backtest:
                 self.market_data.loc[lambda x: (x['timestamp'] == timestamp) & (x['product'] == symbol), 'profit_and_loss'] = pnl
 
     def execute_order(self, timestamp, orders, order_depths, mid_prices):
-        own_trades = []
+        own_trades = {listing.symbol: [] for listing in self.listings}
         for symbol in self.symbols:
             orders_for_symbol = orders[symbol]
             for order in orders_for_symbol:
@@ -120,7 +135,7 @@ class Backtest:
                 else:
                     # Execute sell order
                     trades = self._execute_sell_order(timestamp, order, order_depths, mid_prices)
-                own_trades += trades
+                own_trades[symbol] += trades
         return own_trades
 
     def _execute_buy_order(self, timestamp, order, order_depths, mid_prices):
@@ -233,6 +248,13 @@ class Backtest:
                         new_trades_at_timestamp.append(Trade(trade.symbol, trade.price, new_quantity, "", "", timestamp))
         self.trades_by_timestamp[timestamp] = new_trades_at_timestamp
 
+    def write_log(self):
+        for file_name, data in zip(['trader-orders', 'trader-executions', 'market-old-executions', 'market-executions'], [self.trader_orders, self.trader_executions, self.market_old_executions, self.market_executions]):
+            df = pd.DataFrame(data, columns = ['timestamp', 'symbol', 'price', 'quantity'])
+            df.to_parquet(f"./round0/results/{file_name}.parquet")
+        
+        self.market_data.to_parquet(f"./round0/results/market-data-pnl.parquet")
+
 if __name__ == "__main__":
     listings = [
         Listing(symbol='AMETHYSTS', product='AMETHYSTS', denomination='SEASHELLS'),
@@ -252,13 +274,13 @@ if __name__ == "__main__":
     market_data = pd.read_csv(market_data_path, delimiter=";")
     trade_history = pd.read_csv(trade_history_path, delimiter=";")
 
-    market_data = market_data.loc[lambda x: x['timestamp'] <= 300]
-    trade_history = trade_history.loc[lambda x: x['timestamp'] <= 300]
+    market_data = market_data.loc[lambda x: x['timestamp'] <= 10000]
+    trade_history = trade_history.loc[lambda x: x['timestamp'] <= 10000]
 
     trader = Trader()
     backtest = Backtest(trader, listings, position_limit, market_data, trade_history, output_log)
     backtest.run()
-
+    backtest.write_log()
 
 
     

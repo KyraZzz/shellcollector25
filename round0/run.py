@@ -15,6 +15,7 @@ import string
 
 class Trader:
     def __init__(self):
+        self.acceptable_prices = {'AMETHYSTS': 10000, "STARFRUIT": 5038}
         pass
     
     def run(self, state: TradingState):
@@ -26,14 +27,14 @@ class Trader:
         for product in state.order_depths:
             order_depth: OrderDepth = state.order_depths[product]
             orders: List[Order] = []
-            acceptable_price = 10  # Participant should calculate this value
+            acceptable_price = self.acceptable_prices[product]
             # print("Acceptable price : " + str(acceptable_price))
             # print("Buy Order depth : " + str(len(order_depth.buy_orders)) + ", Sell order depth : " + str(len(order_depth.sell_orders)))
     
             if len(order_depth.sell_orders) != 0:
                 best_ask, best_ask_amount = list(order_depth.sell_orders.items())[0]
                 if int(best_ask) < acceptable_price:
-                    print(f"({product}, BUY, {best_ask}, {str(-best_ask_amount)}")
+                    print(f"{product}, BUY, {best_ask}, {str(-best_ask_amount)}")
                     orders.append(Order(product, best_ask, -best_ask_amount))
     
             if len(order_depth.buy_orders) != 0:
